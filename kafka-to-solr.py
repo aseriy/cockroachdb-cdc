@@ -184,6 +184,8 @@ def main():
     parser.add_argument("-c", "--solr-collection", required=True)
     parser.add_argument("-g", "--kafka-consumer-group", required=True)
     parser.add_argument("-b", "--batch-size", type=int, default=100)
+    parser.add_argument("-n", "--num-batches", type=int, default=1, help="Number of batches to fetch and process before exiting.")
+    parser.add_argument("-i", "--batch-interval-ms", type=int, default=0, help="Optional pause between batches in milliseconds.")
     parser.add_argument("-f", "--fields", nargs="+", required=True, help="One or more field names to include in the Solr document.")
     args = parser.parse_args()
 
@@ -192,26 +194,41 @@ def main():
     if not validate_solr(args.solr_url, args.solr_collection):
         sys.exit(-1)
 
-    batch = fetch_kafka_batch(args.kafka_url, args.kafka_topic, args.kafka_consumer_group, args.batch_size)
+    total_processed = 0
 
-    processed_messages = index_messages_to_solr(
-        messages=batch,
-        solr_url=args.solr_url,
-        solr_collection=args.solr_collection,
-        fields=args.fields,
-        chunk_size=args.batch_size,
-        commit=True,
-    )
+    for batch_num in range(args.num_batches):
+        batch = fetch_kafka_batch(args.kafka_url, args.kafka_topic, args.kafka_consumer_group, args.batch_size)
 
-    print(processed_messages)
+        if not batch:
+            print(f"[batch {batch_num+1}] No more messages to process.")
+            break
 
-    committed_partitions = commit_processed_messages(
-        kafka_url=args.kafka_url,
-        kafka_topic=args.kafka_topic,
-        consumer_group=args.kafka_consumer_group,
-        processed_messages=processed_messages,
-    )
-    print(f"Committed offsets for {committed_partitions} partitions")
+        processed_messages = index_messages_to_solr(
+            messages=batch,
+            solr_url=args.solr_url,
+            solr_collection=args.solr_collection,
+            fields=args.fields,
+            chunk_size=args.batch_size,
+            commit=True,
+        )
+
+        print(f"[batch {batch_num+1}] processed: {processed_messages}")
+
+        committed_partitions = commit_processed_messages(
+            kafka_url=args.kafka_url,
+            kafka_topic=args.kafka_topic,
+            consumer_group=args.kafka_consumer_group,
+            processed_messages=processed_messages,
+        )
+        print(f"[batch {batch_num+1}] committed offsets for {committed_partitions} partitions")
+
+        total_processed += len(processed_messages)
+
+        if args.batch_interval_ms > 0 and batch_num + 1 < args.num_batches:
+            time.sleep(args.batch_interval_ms / 1000.0)
+
+    print(f"Total messages indexed: {total_processed}")
 
 if __name__ == "__main__":
     main()
+
