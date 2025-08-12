@@ -1,0 +1,8 @@
+.venv/
+volumes
+volumes/
+data/
+*.pyc
+homogeneous/
+heterogeneous/
+
