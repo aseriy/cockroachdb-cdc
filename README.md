@@ -100,20 +100,9 @@ curl -X POST -H 'Content-type:application/json' --data-binary '{
 curl "http://172.31.31.199:8983/solr/admin/cores?action=RELOAD&core=crdb-cdc"
 ```
 
-Check that the schema loaded:
+Ensure the uniqueness of the `pid` field:
 
 ```bash
-curl "http://172.31.31.199:8983/solr/crdb-cdc/schema/fields?wt=json&indent=true"
-```
-
-```bash
-curl -X POST -H 'Content-type:application/json' --data-binary '{
-  "add-field": {
-      "name":"my_new_field",
-      "type":"text_general",
-      "indexed":true,
-      "stored":true
-  }
-}' http://172.31.31.199:8983/solr/crdb-cdc/schema
+curl "http://172.31.31.199:8983/solr/crdb-cdc/schema/uniquekey?wt=json&indent=true"
 ```
 
