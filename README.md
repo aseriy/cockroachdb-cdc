@@ -67,6 +67,53 @@ curl "http://172.31.31.199:8983/solr/crdb-cdc/update?commit=true" \
 Get the current core's schema:
 
 ```bash
-curl http://172.31.31.199:8983/solr/crdb-cdc/schema/fields?wt=json
+curl "http://172.31.31.199:8983/solr/crdb-cdc/schema/fields?wt=json&indent=true"
+```
+
+Define Solr schema for the "crdb-cdc" core/collection:
+
+1. Modify the default schema:
+
+```bash
+curl -X POST -H 'Content-type:application/json' --data-binary '{
+  "add-field": [
+    {
+      "name": "pid",
+      "type": "string",
+      "indexed": true,
+      "stored": true,
+      "required": true
+    },
+    {
+      "name": "passage",
+      "type": "text_general",
+      "indexed": true,
+      "stored": true
+    }
+  ]
+}' http://172.31.31.199:8983/solr/crdb-cdc/schema
+```
+
+2. Reload Solr:
+
+```bash
+curl "http://172.31.31.199:8983/solr/admin/cores?action=RELOAD&core=crdb-cdc"
+```
+
+Check that the schema loaded:
+
+```bash
+curl "http://172.31.31.199:8983/solr/crdb-cdc/schema/fields?wt=json&indent=true"
+```
+
+```bash
+curl -X POST -H 'Content-type:application/json' --data-binary '{
+  "add-field": {
+      "name":"my_new_field",
+      "type":"text_general",
+      "indexed":true,
+      "stored":true
+  }
+}' http://172.31.31.199:8983/solr/crdb-cdc/schema
 ```
 

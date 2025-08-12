@@ -39,7 +39,7 @@ services:
     ports:
       - "8983:8983"  # Solr Admin UI
     volumes:
-      - /mnt/volumes/solr/data:/var/solr
+      - /mnt/volumes/solr:/var/solr
     command:
       - solr-precreate
       - crdb-cdc
