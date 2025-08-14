@@ -1,6 +1,7 @@
 import argparse
 import json
 import sys
+import time
 import pysolr
 from kafka import KafkaConsumer, TopicPartition, OffsetAndMetadata
 from typing import List, Dict, Any, Tuple
@@ -48,6 +49,11 @@ def fetch_kafka_batch(kafka_url, kafka_topic, consumer_group, batch_size, timeou
         max_poll_records=batch_size,
     )
     try:
+        for _ in range(50):
+            consumer.poll(timeout_ms=100)
+            if consumer.assignment():
+                break
+
         polled = consumer.poll(timeout_ms=timeout_ms)
         batch = []
         for tp, records in polled.items():
@@ -69,12 +75,7 @@ def fetch_kafka_batch(kafka_url, kafka_topic, consumer_group, batch_size, timeou
     finally:
         consumer.close()
 
-def commit_processed_messages(
-    kafka_url: str,
-    kafka_topic: str,
-    consumer_group: str,
-    processed_messages: List[Tuple[int, int]],
-) -> int:
+def commit_processed_messages(kafka_url: str, kafka_topic: str, consumer_group: str, processed_messages: List[Tuple[int, int]]) -> int:
     if not processed_messages:
         return 0
 
@@ -92,8 +93,7 @@ def commit_processed_messages(
         auto_offset_reset="earliest",
     )
     try:
-        # Wait until the consumer joins the group and gets partition assignment
-        for _ in range(50):  # ~5 seconds total
+        for _ in range(50):
             consumer.poll(timeout_ms=100)
             if consumer.assignment():
                 break
@@ -111,17 +111,7 @@ def commit_processed_messages(
     finally:
         consumer.close()
 
-def index_messages_to_solr(
-    messages: List[Dict[str, Any]],
-    solr_url: str,
-    solr_collection: str,
-    fields: List[str],
-    *,
-    id_field: str | None = None,
-    chunk_size: int,
-    commit: bool = False,
-    soft_commit: bool = False,
-) -> List[Tuple[int, int]]:
+def index_messages_to_solr(messages: List[Dict[str, Any]], solr_url: str, solr_collection: str, fields: List[str], *, id_field: str | None = None, chunk_size: int, commit: bool = False, soft_commit: bool = False) -> List[Tuple[int, int]]:
     solr = pysolr.Solr(f"{solr_url.rstrip('/')}/{solr_collection}", timeout=10)
 
     def _to_doc(msg: Dict[str, Any]) -> Dict[str, Any] | None:
@@ -134,6 +124,7 @@ def index_messages_to_solr(
             return None
 
         if isinstance(payload, dict) and "resolved" in payload:
+            print(f"[resolved] partition={msg.get('partition')} offset={msg.get('offset')} value={payload['resolved']}")
             return None
 
         after = payload.get("after") if isinstance(payload, dict) else None
@@ -148,11 +139,16 @@ def index_messages_to_solr(
 
         return doc
 
-    pairs: List[Tuple[Dict[str, Any], Dict[str, Any]]] = [
-        (m, d) for m in messages if (d := _to_doc(m)) is not None
-    ]
-
+    pairs: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
     successes: List[Tuple[int, int]] = []
+
+    for m in messages:
+        result = _to_doc(m)
+        if result is not None and not isinstance(result, dict):
+            # if _to_doc returned None, it's a resolved or skipped message
+            continue
+        elif isinstance(result, dict):
+            pairs.append((m, result))
 
     for i in range(0, len(pairs), chunk_size):
         chunk = pairs[i : i + chunk_size]
@@ -167,6 +163,18 @@ def index_messages_to_solr(
                     successes.append((m["partition"], m["offset"]))
                 except Exception:
                     pass
+
+    # If no successes (no indexable docs), still return highest seen offsets to commit
+    if not successes:
+        highest_seen: Dict[int, int] = {}
+        for m in messages:
+            p, o = m.get("partition"), m.get("offset")
+            if p is None or o is None:
+                continue
+            prev = highest_seen.get(p)
+            if prev is None or o > prev:
+                highest_seen[p] = o
+        return list(highest_seen.items())
 
     if commit:
         try:
@@ -184,9 +192,9 @@ def main():
     parser.add_argument("-c", "--solr-collection", required=True)
     parser.add_argument("-g", "--kafka-consumer-group", required=True)
     parser.add_argument("-b", "--batch-size", type=int, default=100)
-    parser.add_argument("-n", "--num-batches", type=int, default=1, help="Number of batches to fetch and process before exiting.")
-    parser.add_argument("-i", "--batch-interval-ms", type=int, default=0, help="Optional pause between batches in milliseconds.")
-    parser.add_argument("-f", "--fields", nargs="+", required=True, help="One or more field names to include in the Solr document.")
+    parser.add_argument("-n", "--num-batches", type=int, default=None)
+    parser.add_argument("-i", "--batch-interval-ms", type=int, default=0)
+    parser.add_argument("-f", "--fields", nargs="+", required=True)
     args = parser.parse_args()
 
     if not validate_kafka(args.kafka_url, args.kafka_topic, args.kafka_consumer_group):
@@ -195,8 +203,12 @@ def main():
         sys.exit(-1)
 
     total_processed = 0
+    batch_num = 0
 
-    for batch_num in range(args.num_batches):
+    while True:
+        if args.num_batches is not None and batch_num >= args.num_batches:
+            break
+
         batch = fetch_kafka_batch(args.kafka_url, args.kafka_topic, args.kafka_consumer_group, args.batch_size)
 
         if not batch:
@@ -223,12 +235,12 @@ def main():
         print(f"[batch {batch_num+1}] committed offsets for {committed_partitions} partitions")
 
         total_processed += len(processed_messages)
+        batch_num += 1
 
-        if args.batch_interval_ms > 0 and batch_num + 1 < args.num_batches:
+        if args.batch_interval_ms > 0 and (args.num_batches is None or batch_num < args.num_batches):
             time.sleep(args.batch_interval_ms / 1000.0)
 
     print(f"Total messages indexed: {total_processed}")
 
 if __name__ == "__main__":
     main()
-
